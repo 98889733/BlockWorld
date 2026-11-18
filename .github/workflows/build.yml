@@ -1,47 +1,97 @@
 
-name: RADAR APK Builder
+name: RADAR ZIP to APK Builder
 
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - master
 
 jobs:
   build:
+    name: Unpack and Build RADAR APK
     runs-on: ubuntu-latest
 
     container:
       image: barichello/godot-ci:4.3
 
     steps:
-      - name: Checkout
+      - name: Download repository
         uses: actions/checkout@v4
 
-      - name: Prepare permissions
+      - name: Install ZIP tools
         run: |
-          mkdir -p .godot/editor build
-          chmod -R 777 .godot build
+          command -v unzip || (
+            apt-get update &&
+            apt-get install -y unzip
+          )
 
-      - name: Check export preset
+      - name: Find and unpack ZIP
         run: |
-          test -f export_presets.cfg || {
-            echo "ERROR: export_presets.cfg is missing"
+          mkdir -p /tmp/radar-unpacked
+
+          ZIP=$(find "$GITHUB_WORKSPACE" \
+            -type f -iname "*.zip" \
+            -not -path "*/.git/*" | head -n 1)
+
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: No ZIP archive found!"
             exit 1
-          }
+          fi
 
-      - name: Import project
+          echo "Found archive: $ZIP"
+
+          unzip -oq "$ZIP" -d /tmp/radar-unpacked
+
+          PROJECT=$(find /tmp/radar-unpacked \
+            -name project.godot \
+            -type f -print -quit)
+
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: project.godot not found in ZIP!"
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$PROJECT")
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Godot project found: $PROJECT_DIR"
+
+      - name: Check Android export preset
         run: |
-          godot --headless --editor --path . --quit
+          if [ ! -f "$PROJECT_DIR/export_presets.cfg" ]; then
+            echo "ERROR: export_presets.cfg missing!"
+            exit 1
+          fi
 
-      - name: Build APK
+          echo "Android export preset found!"
+
+      - name: Prepare project
         run: |
-          godot --headless --path . \
-          --export-debug "Android" build/RADAR.apk
+          mkdir -p "$PROJECT_DIR/.godot"
+          chmod -R u+rwX "$PROJECT_DIR/.godot"
 
-      - name: Upload APK
+          godot --headless \
+            --editor \
+            --path "$PROJECT_DIR" \
+            --quit
+
+      - name: Build Android APK
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/build"
+
+          godot --headless \
+            --path "$PROJECT_DIR" \
+            --export-debug "Android" \
+            "$GITHUB_WORKSPACE/build/RADAR.apk"
+
+      - name: Upload finished APK
         uses: actions/upload-artifact@v4
         with:
-          name: RADAR-APK
+          name: RADAR-ANDROID-APK
           path: build/RADAR.apk
           if-no-files-found: error
+          retention-days: 14
           
