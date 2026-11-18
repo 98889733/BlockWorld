@@ -1,93 +1,203 @@
 
-name: RADAR ZIP to APK Builder
+name: RADAR - Automatic APK Builder
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    name: Unpack and Build RADAR APK
-    runs-on: ubuntu-latest
-
-    container:
-      image: barichello/godot-ci:4.3
+    runs-on: ubuntu-22.04
 
     steps:
-      - name: Download repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install ZIP tools
+      - name: Install dependencies
         run: |
-          command -v unzip || (
-            apt-get update &&
-            apt-get install -y unzip
-          )
+          sudo apt-get update
+          sudo apt-get install -y \
+            unzip wget curl zip \
+            openjdk-17-jdk python3
 
-      - name: Find and unpack ZIP
+      - name: Find and extract game ZIP
         run: |
-          mkdir -p /tmp/radar-unpacked
+          mkdir -p /tmp/radar
 
           ZIP=$(find "$GITHUB_WORKSPACE" \
             -type f -iname "*.zip" \
             -not -path "*/.git/*" | head -n 1)
 
           if [ -z "$ZIP" ]; then
-            echo "ERROR: No ZIP archive found!"
+            echo "ERROR: Game ZIP not found"
             exit 1
           fi
 
-          echo "Found archive: $ZIP"
+          unzip -oq "$ZIP" -d /tmp/radar
 
-          unzip -oq "$ZIP" -d /tmp/radar-unpacked
-
-          PROJECT=$(find /tmp/radar-unpacked \
-            -name project.godot \
-            -type f -print -quit)
+          PROJECT=$(find /tmp/radar \
+            -name project.godot -type f -print -quit)
 
           if [ -z "$PROJECT" ]; then
-            echo "ERROR: project.godot not found in ZIP!"
+            echo "ERROR: project.godot missing"
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$PROJECT")
+          echo "PROJECT_DIR=$(dirname "$PROJECT")" >> "$GITHUB_ENV"
 
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-          echo "Godot project found: $PROJECT_DIR"
-
-      - name: Check Android export preset
+      - name: Install Godot 4.3
         run: |
-          if [ ! -f "$PROJECT_DIR/export_presets.cfg" ]; then
-            echo "ERROR: export_presets.cfg missing!"
-            exit 1
-          fi
+          wget -q \
+            https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip \
+            -O godot.zip
 
-          echo "Android export preset found!"
+          unzip -oq godot.zip -d godot
+          sudo mv godot/Godot_v4.3-stable_linux.x86_64 /usr/local/bin/godot
+          sudo chmod +x /usr/local/bin/godot
 
-      - name: Prepare project
+          godot --version
+
+      - name: Install Godot Android templates
+        run: |
+          mkdir -p ~/.local/share/godot/export_templates/4.3.stable
+
+          wget -q \
+            https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz \
+            -O templates.tpz
+
+          mkdir templates
+          unzip -oq templates.tpz -d templates
+
+          cp -a templates/templates/. \
+            ~/.local/share/godot/export_templates/4.3.stable/
+
+      - name: Install Android SDK
+        run: |
+          export ANDROID_SDK_ROOT="$HOME/android-sdk"
+          export ANDROID_HOME="$ANDROID_SDK_ROOT"
+
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+
+          wget -q \
+            https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip \
+            -O android-tools.zip
+
+          mkdir android-tools
+          unzip -oq android-tools.zip -d android-tools
+
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+
+          cp -a android-tools/cmdline-tools/. \
+            "$ANDROID_SDK_ROOT/cmdline-tools/latest/"
+
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+
+          yes | sdkmanager --licenses || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "ndk;23.2.8568313"
+
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+
+      - name: Configure Java and Android
+        run: |
+          JAVA_PATH=$(dirname "$(dirname "$(readlink -f "$(which javac)")")")
+
+          echo "JAVA_HOME=$JAVA_PATH" >> "$GITHUB_ENV"
+
+          mkdir -p "$HOME/.config/godot"
+
+          cat > "$HOME/.config/godot/editor_settings-4.3.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$HOME/android-sdk"
+          export/android/java_sdk_path = "$JAVA_PATH"
+          EOF
+
+      - name: Generate debug keystore
+        run: |
+          mkdir -p "$HOME/.android"
+
+          keytool -genkeypair \
+            -keystore "$HOME/.android/debug.keystore" \
+            -storepass android \
+            -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Configure export preset
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+
+          path = os.path.join(
+              os.environ["PROJECT_DIR"],
+              "export_presets.cfg"
+          )
+
+          if not os.path.isfile(path):
+              raise SystemExit("ERROR: export_presets.cfg missing")
+
+          with open(path, encoding="utf-8") as f:
+              data = f.read()
+
+          if 'name="Android"' not in data:
+              raise SystemExit("ERROR: Android preset not found")
+
+          settings = {
+              "keystore/debug": os.path.expanduser("~/.android/debug.keystore"),
+              "keystore/debug_user": "androiddebugkey",
+              "keystore/debug_password": "android"
+          }
+
+          for key, value in settings.items():
+              pattern = r"(?m)^" + re.escape(key) + r"=.*$"
+              replacement = key + '="' + value + '"'
+
+              if re.search(pattern, data):
+                  data = re.sub(pattern, lambda _: replacement, data)
+              else:
+                  data += "\n" + replacement
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(data)
+
+          print("Android signing configuration prepared.")
+          PY
+
+      - name: Import Godot project
         run: |
           mkdir -p "$PROJECT_DIR/.godot"
-          chmod -R u+rwX "$PROJECT_DIR/.godot"
-
           godot --headless \
             --editor \
             --path "$PROJECT_DIR" \
             --quit
 
-      - name: Build Android APK
+      - name: Build APK
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/build"
+          mkdir -p build
 
           godot --headless \
             --path "$PROJECT_DIR" \
             --export-debug "Android" \
             "$GITHUB_WORKSPACE/build/RADAR.apk"
 
-      - name: Upload finished APK
+          test -s build/RADAR.apk
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: RADAR-ANDROID-APK
