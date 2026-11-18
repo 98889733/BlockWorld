@@ -1,0 +1,47 @@
+
+name: RADAR APK Builder
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build RADAR Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download project
+        uses: actions/checkout@v4
+
+      - name: Install Godot
+        uses: chickensoft-games/setup-godot@v1
+        with:
+          version: 4.3.0
+          use-dotnet: false
+
+      - name: Install Android export templates
+        run: |
+          mkdir -p ~/.local/share/godot/export_templates/4.3.0.stable
+          wget https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz -O templates.tpz
+          unzip -o templates.tpz -d templates
+          cp -r templates/templates/* ~/.local/share/godot/export_templates/4.3.0.stable/
+
+      - name: Prepare build folder
+        run: mkdir -p build
+
+      - name: Build APK
+        run: |
+          godot --headless --editor --path . --quit
+          godot --headless --path . --export-debug "Android" build/RADAR.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: RADAR-APK
+          path: build/RADAR.apk
+          if-no-files-found: error
+          retention-days: 14
+          
