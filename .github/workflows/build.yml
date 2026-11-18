@@ -4,38 +4,39 @@ name: RADAR APK Builder
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main, master]
 
 jobs:
   build:
-    name: Build RADAR Android APK
     runs-on: ubuntu-latest
 
+    container:
+      image: barichello/godot-ci:4.3
+
     steps:
-      - name: Download project
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Godot
-        uses: chickensoft-games/setup-godot@v1
-        with:
-          version: 4.3.0
-          use-dotnet: false
-
-      - name: Install Android export templates
+      - name: Prepare permissions
         run: |
-          mkdir -p ~/.local/share/godot/export_templates/4.3.0.stable
-          wget https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz -O templates.tpz
-          unzip -o templates.tpz -d templates
-          cp -r templates/templates/* ~/.local/share/godot/export_templates/4.3.0.stable/
+          mkdir -p .godot/editor build
+          chmod -R 777 .godot build
 
-      - name: Prepare build folder
-        run: mkdir -p build
+      - name: Check export preset
+        run: |
+          test -f export_presets.cfg || {
+            echo "ERROR: export_presets.cfg is missing"
+            exit 1
+          }
+
+      - name: Import project
+        run: |
+          godot --headless --editor --path . --quit
 
       - name: Build APK
         run: |
-          godot --headless --editor --path . --quit
-          godot --headless --path . --export-debug "Android" build/RADAR.apk
+          godot --headless --path . \
+          --export-debug "Android" build/RADAR.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -43,5 +44,4 @@ jobs:
           name: RADAR-APK
           path: build/RADAR.apk
           if-no-files-found: error
-          retention-days: 14
           
